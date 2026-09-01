@@ -1,2 +1,16 @@
+# Rust
+/target
+**/*.rs.bk
+
+# Node
 node_modules/
-dist/
+
+# Vite output, embedded into the release binary at build time.
+# Checked in only as an empty directory so rust-embed has a folder to point at.
+/dist-ui/*
+!/dist-ui/.gitkeep
+
+# Editors / OS
+.DS_Store
+.idea/
+*.swp
