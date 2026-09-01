@@ -9,6 +9,7 @@ node_modules/
 # Checked in only as an empty directory so rust-embed has a folder to point at.
 /dist-ui/*
 !/dist-ui/.gitkeep
+HANDOFF.MD
 
 # Editors / OS
 .DS_Store
