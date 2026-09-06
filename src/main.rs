@@ -81,10 +81,14 @@ async fn serve(port: u16, tunnel_enabled: bool) -> Result<()> {
     }
 
     let app = server::router(state);
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .context("server error")?;
+    axum::serve(
+        listener,
+        // ConnectInfo: ingress records the peer address on every capture.
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await
+    .context("server error")?;
 
     Ok(())
 }
