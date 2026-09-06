@@ -100,6 +100,77 @@ pub fn signer(name: &str) -> Option<&'static dyn Signer> {
 /// Every scheme name the UI can offer.
 pub const SCHEMES: &[&str] = &["stripe", "github", "svix", "hmac_generic"];
 
+/// Builds the signer named by an endpoint's `scheme` column.
+///
+/// `hmac_generic` carries its per-endpoint configuration inline, after a colon:
+///
+/// ```text
+/// hmac_generic:{"header":"x-sig","encoding":"base64","prefix":"sha256="}
+/// ```
+///
+/// A bare `hmac_generic` takes the defaults. The named schemes are zero-sized,
+/// so boxing them costs nothing.
+pub fn resolve(scheme: &str) -> Result<Box<dyn Signer>> {
+    let (name, spec) = scheme.split_once(':').unwrap_or((scheme, ""));
+
+    Ok(match name.trim() {
+        "stripe" => Box::new(stripe::Stripe),
+        "github" => Box::new(github::GitHub),
+        "svix" => Box::new(svix::Svix),
+        "hmac_generic" => Box::new(if spec.trim().is_empty() {
+            hmac_generic::HmacGeneric::default()
+        } else {
+            hmac_generic::HmacGeneric::from_spec(spec)?
+        }),
+        other => anyhow::bail!("unknown signature scheme {other:?}"),
+    })
+}
+
+/// The verdict stored against a captured request.
+///
+/// Misconfiguration on *our* side — a scheme with no secret, or a name that no
+/// longer resolves — is [`Verdict::None`] with the reason in the detail, not
+/// [`Verdict::Invalid`]. Blaming the sender for our own broken config is the
+/// kind of wrong answer that costs an afternoon.
+pub fn judge(
+    scheme: Option<&str>,
+    secret: Option<&str>,
+    headers: &Headers,
+    body: &[u8],
+    now: i64,
+) -> Verification {
+    let Some(scheme) = scheme.filter(|s| !s.is_empty()) else {
+        return Verification {
+            verdict: Verdict::None,
+            detail: None,
+        };
+    };
+
+    let Some(secret) = secret.filter(|s| !s.is_empty()) else {
+        return Verification {
+            verdict: Verdict::None,
+            detail: Some(format!("endpoint has scheme `{scheme}` but no secret")),
+        };
+    };
+
+    let signer = match resolve(scheme) {
+        Ok(signer) => signer,
+        Err(e) => {
+            return Verification {
+                verdict: Verdict::None,
+                detail: Some(e.to_string()),
+            };
+        }
+    };
+
+    signer.verify(&VerifyInput {
+        body,
+        secret,
+        headers,
+        now,
+    })
+}
+
 // ------------------------------------------------------------------ helpers
 
 /// HMAC-SHA256 of `payload` under `key`.
@@ -152,6 +223,71 @@ mod tests {
         assert_eq!(skew_beyond(1_000, 1_100, 300), None);
         assert_eq!(skew_beyond(1_000, 1_400, 300), Some(400));
         assert_eq!(skew_beyond(1_400, 1_000, 300), Some(-400));
+    }
+
+    #[test]
+    fn resolve_handles_the_inline_hmac_generic_spec() {
+        assert_eq!(resolve("github").unwrap().name(), "github");
+        assert_eq!(resolve("hmac_generic").unwrap().name(), "hmac_generic");
+        assert_eq!(
+            resolve(r#"hmac_generic:{"header":"x-sig","encoding":"base64"}"#)
+                .unwrap()
+                .name(),
+            "hmac_generic"
+        );
+        assert!(resolve("hmac_generic:not json").is_err());
+        assert!(resolve("nope").is_err());
+    }
+
+    #[test]
+    fn judge_reports_misconfiguration_as_none_not_invalid() {
+        let headers = Headers::new();
+
+        // No scheme at all: nothing to say.
+        let v = judge(None, None, &headers, FIXTURE_BODY, 0);
+        assert_eq!(v.verdict, Verdict::None);
+        assert!(v.detail.is_none());
+
+        // Scheme without a secret, and an unknown scheme: both explain themselves.
+        for (scheme, secret) in [(Some("github"), None), (Some("nope"), Some("s"))] {
+            let v = judge(scheme, secret, &headers, FIXTURE_BODY, 0);
+            assert_eq!(v.verdict, Verdict::None);
+            assert!(v.detail.is_some());
+        }
+
+        // A configured endpoint with no signature header is the sender's gap.
+        let v = judge(Some("github"), Some("s"), &headers, FIXTURE_BODY, 0);
+        assert_eq!(v.verdict, Verdict::Unsigned);
+    }
+
+    #[test]
+    fn judge_routes_a_signed_request_to_the_right_scheme() {
+        let headers = github::GitHub
+            .sign(&SignInput {
+                body: FIXTURE_BODY,
+                secret: "ghs_test_secret",
+                timestamp: 0,
+            })
+            .unwrap();
+
+        let v = judge(
+            Some("github"),
+            Some("ghs_test_secret"),
+            &headers,
+            FIXTURE_BODY,
+            0,
+        );
+        assert_eq!(v.verdict, Verdict::Valid);
+
+        // Right digest, wrong scheme: stripe looks for a header that isn't there.
+        let v = judge(
+            Some("stripe"),
+            Some("ghs_test_secret"),
+            &headers,
+            FIXTURE_BODY,
+            0,
+        );
+        assert_eq!(v.verdict, Verdict::Unsigned);
     }
 
     #[test]
