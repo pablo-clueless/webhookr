@@ -35,6 +35,11 @@ export interface CreateEndpoint {
 }
 
 /** Partial update. Omit a field to leave it alone; `null` clears it. */
+/**
+ * Partial update. Omitting a key leaves the column untouched; sending an
+ * explicit `null` clears it. The two are *not* interchangeable — the server
+ * distinguishes them, so never send `null` meaning "no change".
+ */
 export type PatchEndpoint = Partial<Omit<Endpoint, "id" | "token" | "created_at">>;
 
 /** List-row shape — carries no body, so the list stays cheap. */
